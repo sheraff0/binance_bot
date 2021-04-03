@@ -27,8 +27,11 @@ class ProfileMixin:
         chat_id = profile.get('telegram_chat_id')
         api_key = profile.get('binance_api_key')
         secret_key = profile.get('binance_secret_key')
+        notifications = profile.get('notifications')
+        if not (api_key and secret_key):
+            return
         binance = BinanceAccount(self.bot, chat_id, api_key, secret_key)
-        if binance.account_status:
+        if binance.account_status and notifications:
             binance.start_user_socket()
         return binance
 
@@ -50,6 +53,7 @@ class BinanceMixin(ProfileMixin):
         'NEW': ['Добавить пару ключей'],
         'EXISTING': ['Заменить пару ключей', 'Настроить уведомления'],
     }
+    NOTIFICATIONS_OPTIONS = ['Включить', 'Отключить']
 
     def __init__(self, *args):
         super().__init__(*args)
@@ -66,7 +70,6 @@ class BinanceMixin(ProfileMixin):
 
     def shredder(self, chat_id, message):
         self.bot.delete_message(chat_id, message.message_id)
-        self.bot.delete_message(chat_id, message.message_id - 1)
 
     def start(self, update: Updater, context: CallbackContext) -> int:
         chat_id, text, from_user = self.get_message_details(update)
@@ -94,7 +97,13 @@ class BinanceMixin(ProfileMixin):
             query.edit_message_text(text="Введите API-ключ:")
             return self.ADD_API_KEY
         elif action == 1:
-            query.edit_message_text(text="Настроить уведомления:")
+            reply_keyboard = [self.options_list_buttons(
+                self.NOTIFICATIONS_OPTIONS)]
+            reply_markup = InlineKeyboardMarkup(reply_keyboard)
+            query.edit_message_text(
+                '\n'.join([
+                    "Настройка уведомлений:"
+                ]), reply_markup=reply_markup)
             return self.EDIT_NOTIFICATIONS
 
     def add_api_key(self, update: Update, context: CallbackContext) -> int:
@@ -137,8 +146,26 @@ class BinanceMixin(ProfileMixin):
             return self.ADD_API_KEY
 
     def edit_notifications(self, update: Update, context: CallbackContext) -> int:
-        update.message.reply_text(
-            text=f"Уведомления настроены!")
+        query = update.callback_query
+        query.answer()
+        action = int(query.data)
+        chat_id = str(query.message.chat_id)
+        notifications_state = self.profiles[chat_id].get('notifications')
+        notifications = action == 0
+        self.update_profile(chat_id, {'notifications': notifications})
+        if not notifications_state and notifications:
+            binance = self.get_binance_account(self.profiles[chat_id])
+            self.update_profile(chat_id, {'binance_account': binance})
+        elif notifications_state and not notifications:
+            binance = self.profiles[chat_id].get('binance_account')
+            binance.stop_user_socket()
+            del binance
+            self.update_profile(chat_id, {'binance_account': None})
+        profile_db, new = self.get_profile_db(chat_id)
+        profile_db.notifications = notifications
+        profile_db.save()
+        query.edit_message_text(
+            text=f"Уведомления {'включены' if notifications else 'отключены'}!")
         return ConversationHandler.END
 
     def cancel(self, update: Update, context: CallbackContext) -> int:
@@ -146,16 +173,24 @@ class BinanceMixin(ProfileMixin):
         return ConversationHandler.END
 
     def get_handler(self):
+        command_handlers = [
+            CommandHandler('start', self.start),
+            CommandHandler('cancel', self.cancel)
+        ]
         return ConversationHandler(
             entry_points=[CommandHandler('start', self.start)],
             states={
                 self.ROOT_ACTION: [CallbackQueryHandler(self.root_action)],
-                self.ADD_API_KEY: [MessageHandler(
-                    Filters.text, self.add_api_key)],
-                self.ADD_SECRET_KEY: [MessageHandler(
-                    Filters.text, self.add_secret_key)],
-                self.EDIT_NOTIFICATIONS: [MessageHandler(
-                    Filters.text, self.edit_notifications)],
+                self.ADD_API_KEY: [
+                    MessageHandler(Filters.text, self.add_api_key),
+                    *command_handlers
+                ],
+                self.ADD_SECRET_KEY: [
+                    MessageHandler(Filters.text, self.add_secret_key),
+                    *command_handlers
+                ],
+                self.EDIT_NOTIFICATIONS: [CallbackQueryHandler(
+                    self.edit_notifications)],
             },
             fallbacks=[CommandHandler('cancel', self.cancel)]
         )

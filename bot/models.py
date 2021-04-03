@@ -18,5 +18,7 @@ class Profile(models.Model):
         verbose_name="Секретный ключ Binance",
         null=True, blank=True,
     )
+    notifications = models.BooleanField(
+        default=True, editable=True, verbose_name='Уведомления')
 
     objects = ProfileQueryset.as_manager()
