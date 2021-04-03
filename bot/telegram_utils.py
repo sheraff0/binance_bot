@@ -122,7 +122,10 @@ class BinanceMixin(ProfileMixin):
         chat_id = str(chat_id)
         message = update.message
         secret_key = text
-        self.update_profile(chat_id, {'binance_secret_key': secret_key})
+        self.update_profile(chat_id, {
+            'binance_secret_key': secret_key,
+            'notifications': True
+        })
         api_key = self.profiles[chat_id].get('binance_api_key')
         binance = self.profiles[chat_id].get('binance_account')
         if binance:
@@ -135,10 +138,7 @@ class BinanceMixin(ProfileMixin):
             profile_db.binance_api_key = api_key
             profile_db.binance_secret_key = secret_key
             profile_db.save()
-            self.update_profile(chat_id, {
-                'binance_account': binance,
-                'notifications': True
-            })
+            self.update_profile(chat_id, {'binance_account': binance})
             self.shredder(chat_id, message)
             message.reply_text(
                 text=f"Пара ключей принята. Веб-сокет открыт.")
