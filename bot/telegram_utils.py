@@ -1,6 +1,3 @@
-import asyncio
-from multiprocessing import Process
-import datetime
 from telegram import (
     Bot, Update, ReplyKeyboardMarkup,
     InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,6 +21,7 @@ class ProfileMixin:
         return Profile.objects.get_or_create(telegram_chat_id=chat_id)
 
     def get_binance_account(self, profile):
+        print(profile)
         chat_id = profile.get('telegram_chat_id')
         api_key = profile.get('binance_api_key')
         secret_key = profile.get('binance_secret_key')
@@ -31,8 +29,9 @@ class ProfileMixin:
         if not (api_key and secret_key):
             return
         binance = BinanceAccount(self.bot, chat_id, api_key, secret_key)
-        if binance.account_status and notifications:
+        if binance and binance.account_status and notifications:
             binance.start_user_socket()
+            print(binance)
         return binance
 
     def dump_profiles(self):
@@ -128,10 +127,9 @@ class BinanceMixin(ProfileMixin):
         })
         api_key = self.profiles[chat_id].get('binance_api_key')
         binance = self.profiles[chat_id].get('binance_account')
-        if binance:
+        if binance and binance.account_status:
             binance.stop_user_socket()
-            del binance
-            self.update_profile(chat_id, {'binance_account': None})
+        self.profiles[chat_id]['binance_account'] = None
         binance = self.get_binance_account(self.profiles[chat_id])
         if binance.account_status:
             profile_db, new = self.get_profile_db(chat_id)
@@ -156,14 +154,14 @@ class BinanceMixin(ProfileMixin):
         notifications_state = self.profiles[chat_id].get('notifications')
         notifications = action == 0
         self.update_profile(chat_id, {'notifications': notifications})
-        if not notifications_state and notifications:
-            binance = self.get_binance_account(self.profiles[chat_id])
-            self.update_profile(chat_id, {'binance_account': binance})
-        elif notifications_state and not notifications:
-            binance = self.profiles[chat_id].get('binance_account')
-            binance.stop_user_socket()
-            del binance
-            self.update_profile(chat_id, {'binance_account': None})
+        binance = self.profiles[chat_id].get('binance_account')
+        if binance and binance.account_status:
+            if not notifications_state and notifications:
+                self.profiles[chat_id]['binance_account'] = None
+                binance = self.get_binance_account(self.profiles[chat_id])
+                self.update_profile(chat_id, {'binance_account': binance})
+            elif notifications_state and not notifications:
+                binance.stop_user_socket()
         profile_db, new = self.get_profile_db(chat_id)
         profile_db.notifications = notifications
         profile_db.save()
@@ -185,12 +183,12 @@ class BinanceMixin(ProfileMixin):
             states={
                 self.ROOT_ACTION: [CallbackQueryHandler(self.root_action)],
                 self.ADD_API_KEY: [
-                    MessageHandler(Filters.text, self.add_api_key),
-                    *command_handlers
+                    *command_handlers,
+                    MessageHandler(Filters.text, self.add_api_key)
                 ],
                 self.ADD_SECRET_KEY: [
-                    MessageHandler(Filters.text, self.add_secret_key),
-                    *command_handlers
+                    *command_handlers,
+                    MessageHandler(Filters.text, self.add_secret_key)
                 ],
                 self.EDIT_NOTIFICATIONS: [CallbackQueryHandler(
                     self.edit_notifications)],

@@ -11,13 +11,13 @@ class BinanceAccount:
             self.client = Client(api_key=api_key, api_secret=secret_key)
             self.account_status = self.client.get_account_status()
             print(self.account_status)
-            self.socket_manager = BinanceSocketManager(self.client)
         except (KeyError, BinanceAPIException) as e:
             print(e)
             self.account_status = None
 
     def start_user_socket(self):
         print("Starting...")
+        self.socket_manager = BinanceSocketManager(self.client)
         self.conn_key = self.socket_manager.start_user_socket(
             self.process_msg)
         self.socket_manager.start()
