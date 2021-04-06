@@ -136,6 +136,7 @@ class BinanceMixin(ProfileMixin):
             'notifications': True
         })
         self.submit_profile(chat_id)
+        self.shredder(chat_id, message)
         message.reply_text(
             text=f"Пара ключей принята.")
         return ConversationHandler.END
