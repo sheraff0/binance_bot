@@ -1,8 +1,10 @@
 import asyncio
-from multiprocessing import Process, Manager
+from concurrent.futures import ThreadPoolExecutor
+
 from django.core.management.base import BaseCommand, CommandError
 
 from bot.telegram_utils import BinanceBot
+from bot.binance_utils import BinanceAccountsManager
 
 
 class Command(BaseCommand):
@@ -12,15 +14,22 @@ class Command(BaseCommand):
         # parser.add_argument('poll_ids', nargs='+', type=int)
         pass
 
-    def run_bot(self, state):
-        bot = BinanceBot(state)
-        bot.set_updater()
+    async def run_bot(self, loop, queue):
+        bot = BinanceBot(loop, queue)
+        with ThreadPoolExecutor() as pool:
+            await loop.run_in_executor(
+                pool, bot.set_updater)
+
+    async def run_manager(self, loop, queue):
+        manager = BinanceAccountsManager(queue)
+        loop.create_task(manager.subscribe())
+
+    def main(self):
+        loop = asyncio.get_event_loop()
+        queue = asyncio.Queue()
+        loop.create_task(self.run_bot(loop, queue))
+        loop.create_task(self.run_manager(loop, queue))
+        loop.run_forever()
 
     def handle(self, *args, **options):
-        m = Manager()
-        state = m.dict()
-        ps = [Process(target=x, args=(state, ), daemon=True) for x in (
-            self.run_bot,
-        )]
-        [p.start() for p in ps]
-        [p.join() for p in ps]
+        self.main()

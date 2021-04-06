@@ -1,6 +1,3 @@
-import asyncio
-from asgiref.sync import sync_to_async
-
 from telegram import (
     Bot, Update, ReplyKeyboardMarkup,
     InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,6 +11,7 @@ from telegram.error import BadRequest
 
 from django.conf import settings as _
 from bot.models import Profile
+from .binance_utils import BinanceAccount
 
 
 class ProfileMixin:
@@ -22,29 +20,26 @@ class ProfileMixin:
     def get_profile_db(self, chat_id):
         return Profile.objects.get_or_create(telegram_chat_id=chat_id)
 
-    @sync_to_async
-    def save_profile_db(self, chat_id, api_key, secret_key, notifications):
-        profile_db, new = self.get_profile_db(chat_id)
-        profile_db.binance_api_key = api_key
-        profile_db.binance_secret_key = secret_key
-        profile_db.notifications = notifications
-        profile_db.save()
+    def get_binance_account(self, profile):
+        print(profile)
+        chat_id = profile.get('telegram_chat_id')
+        api_key = profile.get('binance_api_key')
+        secret_key = profile.get('binance_secret_key')
+        notifications = profile.get('notifications')
+        if not (api_key and secret_key):
+            return
+        binance = BinanceAccount(self.bot, chat_id, api_key, secret_key)
+        if binance and binance.account_status and notifications:
+            binance.start_user_socket()
+            print(binance)
+        return binance
 
-    # Profile passed to `binance_utils.BinanceAccountManager`
-    # via `asyncio.Queue`
-    async def set_binance_account(self, chat_id):
-        profile = self.profiles[chat_id]
-        asyncio.create_task(
-            self.queue.put((profile, self)))
-
-    # Invokes Django's sync-only method, so needs a wrapper like this
-    @sync_to_async
     def dump_profiles(self):
         profiles = [*Profile.objects.standard_values()]
         self.profiles = {x['telegram_chat_id']: x for x in profiles}
-        for chat_id in self.profiles:
-            asyncio.run_coroutine_threadsafe(
-                self.set_binance_account(chat_id), self.loop)
+        for chat_id, profile in self.profiles.items():
+            self.profiles[chat_id][
+                'binance_account'] = self.get_binance_account(profile)
 
 
 class BinanceMixin(ProfileMixin):
@@ -61,16 +56,11 @@ class BinanceMixin(ProfileMixin):
 
     def __init__(self, *args):
         super().__init__(*args)
-        asyncio.run_coroutine_threadsafe(
-            self.dump_profiles(), self.loop)
+        self.dump_profiles()
 
     def update_profile(self, chat_id, obj_dict):
         self.profiles[chat_id] = {
             **self.profiles.get(chat_id, {}), **obj_dict}
-
-    def submit_profile(self, chat_id):
-        asyncio.run_coroutine_threadsafe(
-            self.set_binance_account(chat_id), self.loop)
 
     def options_list_buttons(self, list_):
         return [InlineKeyboardButton(
@@ -123,7 +113,7 @@ class BinanceMixin(ProfileMixin):
         self.update_profile(chat_id, {'binance_api_key': api_key})
         self.shredder(chat_id, message)
         update.message.reply_text(
-            text="API-ключ принят.\nВведите секретный ключ (любое значение):")
+            text="API-ключ принят.\nВведите секретный ключ:")
         return self.ADD_SECRET_KEY
 
     def add_secret_key(self, update: Update, context: CallbackContext) -> int:
@@ -135,10 +125,26 @@ class BinanceMixin(ProfileMixin):
             'binance_secret_key': secret_key,
             'notifications': True
         })
-        self.submit_profile(chat_id)
-        message.reply_text(
-            text=f"Пара ключей принята.")
-        return ConversationHandler.END
+        api_key = self.profiles[chat_id].get('binance_api_key')
+        binance = self.profiles[chat_id].get('binance_account')
+        if binance and binance.account_status:
+            binance.stop_user_socket()
+        self.profiles[chat_id]['binance_account'] = None
+        binance = self.get_binance_account(self.profiles[chat_id])
+        if binance.account_status:
+            profile_db, new = self.get_profile_db(chat_id)
+            profile_db.binance_api_key = api_key
+            profile_db.binance_secret_key = secret_key
+            profile_db.save()
+            self.update_profile(chat_id, {'binance_account': binance})
+            self.shredder(chat_id, message)
+            message.reply_text(
+                text=f"Пара ключей принята. Веб-сокет открыт.")
+            return ConversationHandler.END
+        else:
+            update.message.reply_text(
+                text="Введите верную пару ключей!\nВведите API-ключ:")
+            return self.ADD_API_KEY
 
     def edit_notifications(self, update: Update, context: CallbackContext) -> int:
         query = update.callback_query
@@ -148,7 +154,14 @@ class BinanceMixin(ProfileMixin):
         notifications_state = self.profiles[chat_id].get('notifications')
         notifications = action == 0
         self.update_profile(chat_id, {'notifications': notifications})
-        self.submit_profile(chat_id)
+        binance = self.profiles[chat_id].get('binance_account')
+        if binance and binance.account_status:
+            if not notifications_state and notifications:
+                self.profiles[chat_id]['binance_account'] = None
+                binance = self.get_binance_account(self.profiles[chat_id])
+                self.update_profile(chat_id, {'binance_account': binance})
+            elif notifications_state and not notifications:
+                binance.stop_user_socket()
         profile_db, new = self.get_profile_db(chat_id)
         profile_db.notifications = notifications
         profile_db.save()
@@ -185,9 +198,10 @@ class BinanceMixin(ProfileMixin):
 
 
 class TelegramBot:
-    def __init__(self, loop, queue):
-        self.loop, self.queue = loop, queue
+    def __init__(self, state):
         self.create_bot()
+        self.state = state
+        self.state['listen_keys'] = set()
 
     def create_bot(self):
         request = Request(
@@ -208,7 +222,7 @@ class TelegramBot:
         updater.dispatcher.add_handler(
             self.get_handler_echo())
         updater.start_polling()
-        # updater.idle()  - not necessary, as this fuction is run in executor
+        updater.idle()
 
     def get_handler_echo(self):
         # Echo as default
