@@ -14,6 +14,8 @@ SUBSCRIBE = {
   ],
   "id": 1
 }
+LISTEN_KEY_TIMEOUT = 30 * 60
+WS_CONNECTION_TIMEOUT = 24 * 60 * 60
 
 
 class BinanceAccount(ConnectionManager):
@@ -36,16 +38,33 @@ class BinanceAccount(ConnectionManager):
         )
         try:
             self.listen_key = json.loads(response).get('listenKey')
+            print(f"Received listenKey {self.listen_key}")
             return self.listen_key
         except Exception as e:
             print(e)
 
+    async def keep_alive_listen_key(self):
+        while True:
+            await asyncio.sleep(LISTEN_KEY_TIMEOUT)
+            await self.get_listen_key()
+
     async def user_stream(self, callback=print):
-        self.bot.send_message(self.chat_id, "Веб-сокет открыт.")
         await self.ws_client(
             f'{WSS_URL}{self.listen_key}',
             callback=self.process_msg
         )
+
+    async def persistent_user_stream(self):
+        while True:
+            try:
+                self.bot.send_message(self.chat_id, "Веб-сокет открыт.")
+                await asyncio.wait_for(
+                    self.user_stream(),
+                    WS_CONNECTION_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                self.bot.send_message(
+                    self.chat_id, "Веб-сокет закрыт. Перезапуск...")
 
     def process_msg(self, msg):
         self.bot.send_message(self.chat_id, msg)
@@ -62,13 +81,13 @@ class BinanceAccountsManager:
         notifications = profile.get('notifications')
         return chat_id, api_key, notifications
 
-    def cancel_task(self, chat_id, bot):
-        _, task = self.accounts.get(chat_id, (None, None))
-        if task:
+    def cancel_tasks(self, chat_id, bot):
+        _, *tasks = self.accounts.get(chat_id, (None, None))
+        if tasks and tasks[0]:
             bot.bot.send_message(chat_id, "Веб-сокет закрыт.")
             print(f"CANCELLING TASKS for {chat_id}")
-            print(asyncio.all_tasks())
-            task.cancel()
+            print(tasks)
+            [task.cancel() for task in tasks if task]
 
     async def activate_account(self, msg):
         profile, bot = msg
@@ -77,15 +96,16 @@ class BinanceAccountsManager:
         account = BinanceAccount(bot, *parsed_profile)
         # Write to database
         await bot.save_profile_db(chat_id, api_key, None, notifications)
-        self.cancel_task(chat_id, bot)
+        self.cancel_tasks(chat_id, bot)
         if notifications:
             if account.api_key:
                 await account.get_listen_key()
             if account.listen_key:
-                print(account.listen_key)
-                task = asyncio.create_task(
-                    account.user_stream())
-                self.accounts[chat_id] = account, task
+                tasks = [asyncio.create_task(task()) for task in [
+                    account.persistent_user_stream,
+                    account.keep_alive_listen_key,
+                ]]
+                self.accounts[chat_id] = [account, *tasks]
             else:
                 self.accounts[chat_id] = None, None
                 bot.bot.send_message(chat_id, "Неверный ключ.")
@@ -93,6 +113,6 @@ class BinanceAccountsManager:
     async def subscribe(self):
         while True:
             msg = await self.queue.get()
-            print(f"Received task: {msg}")
+            print(f"Received profile data: {msg}")
             self.queue.task_done()
             await self.activate_account(msg)

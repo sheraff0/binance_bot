@@ -1,3 +1,4 @@
+import asyncio
 import websockets
 from aiohttp import ClientSession
 
